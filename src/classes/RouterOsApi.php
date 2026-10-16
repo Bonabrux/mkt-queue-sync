@@ -2,14 +2,10 @@
 
 declare(strict_types=1);
 
-
 namespace MikrotikQueueSync;
 
 use RouterOS\Client;
 use RouterOS\Query;
-use RouterOS\Exceptions\ConfigException;
-use RouterOS\Exceptions\ClientException;
-use Ubnt\UcrmPluginSdk\Service\PluginConfigManager;
 
 class RouterOsApi
 {
@@ -18,142 +14,105 @@ class RouterOsApi
      */
     private $client;
 
-    /*public function __construct(Client $client)
+    /**
+     * Charset used on the router (plugin "Mikrotik charset"). UISP data is always UTF-8:
+     * everything sent is converted to this charset and everything read is converted back to UTF-8.
+     *
+     * @var string
+     */
+    private $charset;
+
+    public function __construct(Client $client, string $charset = 'UTF-8')
     {
         $this->client = $client;
-    }*/
-	
-	public function __construct($clients)
-    {
-		$countConstruct = 0;
-		foreach($clients as $client){
-		//echo '<pre>'; var_dump($client); echo '</pre>';
-		$this->client[$countConstruct] = $client;
-		$countConstruct++;
-		}
-		
-		foreach ($this->client as $test){
-		//	echo '<pre>'; var_dump($test); echo '</pre>';
-		}
+        $this->charset = $charset;
     }
 
-    public static function create($logger, ?int $devQty): self
+    public static function create(array $config): self
     {
-		$config = (new PluginConfigManager())->loadConfig();
-		isset($config['apiport']) ?  [] : $config['apiport'] = (int) 8728;
-		foreach(explode(',',$config['mktip']) as $mktIp){
-		try {
-		$client[$devQty] = new Client(
+        $client = new Client(
             [
-                'host' => $mktIp,
+                'host' => $config['mktip'],
                 'user' => $config['mktusr'],
                 'pass' => (string) $config['mktpass'],
-				'port' => (int) $config['apiport'],
-			]
+                'port' => (int) ($config['apiport'] ?: 8728),
+            ]
         );
-				
-		} catch (Exception | ConfigException | ClientException $e) {
-        echo "<br> ERROR EN LA CONEXION A MIKROTIK IP: " . $mktIp . "<br>";
-		echo $e->getMessage();
-		//echo "<br> EL PROGRAMA NO CONTINUARA <br>";
-		$logger->appendLog("ERROR EN LA CONEXION A MIKROTIK IP: " . $mktIp);
-        $logger->appendLog($e->getMessage());
-		//$logger->appendLog("EL PROGRAMA NO CONTINUARA!!!");
-		}
-		}
-        
 
-        return new self($client);
+        return new self($client, ($config['outCharset'] ?? null) ?: 'UTF-8');
     }
 
-    public function wr(int $deviceNum, string $endpoint, $attrs = NULL): array
+    /**
+     * Converts strings (recursively in arrays) between charsets.
+     *
+     * @param mixed $value
+     * @return mixed
+     */
+    public static function convert($value, string $to, string $from)
     {
-        is_null($attrs) ? $response = $this->getClient($deviceNum)->wr([$endpoint]) : $response = $this->getClient($deviceNum)->wr([$endpoint, $attrs]);
-		return $response;
-	}
-	
-	public function print(int $deviceNum, string $endpoint): array
-    {
-		//$deviceNum = 0;
-        return $this->getClient($deviceNum)->write(new Query(sprintf('%s/print', $endpoint)))->read();
-	}
-
-    public function remove(int $deviceNum, string $endpoint, array $ids): array
-    {
-		//$deviceNum = 1;
-        if (! $ids) {
-            return [];
+        if ($to === $from) {
+            return $value;
+        }
+        if (is_array($value)) {
+            return array_map(function ($item) use ($to, $from) {
+                return self::convert($item, $to, $from);
+            }, $value);
         }
 
-        $query = new Query(sprintf('%s/remove', $endpoint));
-        foreach ($ids as $id) {
-            $query->add(sprintf('=.id=%s', $id));
-        $result = $this->getClient($deviceNum)->write($query)->read();
-		}
-		//var_dump($query);
-        return $result;
+        return is_string($value) ? mb_convert_encoding($value, $to, $from) : $value;
     }
 
-    public function add(int $deviceNum, string $endpoint, array $sentences): void
+    public function print(string $endpoint): array
     {
-		//$deviceNum = 1;
+        return $this->read(new Query($endpoint . '/print'));
+    }
+
+    public function printwhere(string $endpoint, array $params): array
+    {
+        $query = new Query($endpoint);
+        foreach ($params as $param) {
+            $query->add(self::convert($param, $this->charset, 'UTF-8'));
+        }
+
+        return $this->read($query);
+    }
+
+    /**
+     * @return string[] router errors
+     */
+    public function add(string $endpoint, array $sentences): array
+    {
+        return $this->writeAll($endpoint . '/add', $sentences);
+    }
+
+    /**
+     * @return string[] router errors
+     */
+    public function set(string $endpoint, array $sentences): array
+    {
+        return $this->writeAll($endpoint . '/set', $sentences);
+    }
+
+    private function writeAll(string $command, array $sentences): array
+    {
+        $errors = [];
         foreach ($sentences as $sentence) {
             $sentence = array_filter($sentence);
-			
-			$query = new Query(sprintf('%s/add', $endpoint));
-			$orders = '';
+            $query = new Query($command);
             foreach ($sentence as $key => $item) {
-              $query->add(sprintf('=%s=%s', $key, $item));
-			
+                $query->add(sprintf('=%s=%s', $key, self::convert((string) $item, $this->charset, 'UTF-8')));
             }
-			
-			$this->getClient($deviceNum)->write($query)->read();
-			
+            $error = $this->read($query)['after']['message'] ?? null;
+            if ($error) {
+                $errors[] = sprintf('Mikrotik says "%s" on %s %s', $error, $command, json_encode($sentence, JSON_UNESCAPED_UNICODE));
+            }
         }
+
+        return $errors;
     }
-	
-	 public function addAddressList(int $deviceNum, string $endpoint, array $sentences, string $commentPrefix = 'ucrm_mktsync_'): void
+
+    private function read(Query $query): array
     {
-		//$deviceNum = 1;
-        foreach ($sentences as $sentence) {
-            $sentence = array_filter($sentence);
-
-            if (
-                $commentPrefix
-                && $sentence['comment'] ?? false
-            ) {
-                $sentence['comment'] = sprintf('%s%s', $commentPrefix, $sentence['comment']);
-            }
-
-            $query = new Query(sprintf('%s/add', $endpoint));
-
-            foreach ($sentence as $key => $item) {
-                $query->add(sprintf('=%s=%s', $key, $item));
-            }
-
-            $this->getClient($deviceNum)->write($query)->read();
-        }
-    }
-	
-	public function set(int $deviceNum, string $endpoint, array $sentences): void
-    {
-		//$deviceNum = 1;
-		foreach ($sentences as $sentence) {
-            $query = new Query(sprintf('%s/set',$endpoint));
-			$sentence = array_filter($sentence);
-
-            foreach ($sentence as $key => $item) {
-			    $query->add(sprintf('=%s=%s', $key, $item));
-            }
-			
-			$this->getClient($deviceNum)->write($query)->read();
-			
-			
-        }
-	}
-
-    public function getClient($deviceNum): Client
-    {
-        return $this->client[$deviceNum];
+        return self::convert($this->client->query($query)->read(), 'UTF-8', $this->charset);
     }
 }

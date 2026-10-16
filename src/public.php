@@ -1,52 +1,26 @@
 <?php
-global $data;
 
-if($json = json_decode(file_get_contents("php://input"), true)) {
-     //print_r($json);
-     $data['option'] = 'WebHook-sZkmt5aIohKXMmRrnI3DfDk';
-	
- } else {
-     //print_r($_POST);
-     $data = $_GET;
-	
-
- }
+declare(strict_types=1);
 
 use MikrotikQueueSync\Synchronizer;
-use Ubnt\UcrmPluginSdk\Service\PluginLogManager;
 use Ubnt\UcrmPluginSdk\Security\PermissionNames;
 use Ubnt\UcrmPluginSdk\Service\UcrmSecurity;
 
 require_once __DIR__ . '/vendor/autoload.php';
 
-(static function () {
-	global $data;
-	
-	// Ensure that user is logged in and has permission to view invoices.
-	$security = UcrmSecurity::create();
-	$user = $security->getUser();
-	
-	if (isset($data['option'])){
-		if ($data['option'] == "Sync") {
-		if (! $user || $user->isClient || ! $user->hasViewPermission(PermissionNames::CLIENTS_SERVICES)) {
-			\MikrotikQueueSync\Http::forbidden();
-			}
-		(new Synchronizer())->sync();
-		} else if ($data['option'] == "reset-log") {
-		if (! $user || $user->isClient || ! $user->hasViewPermission(PermissionNames::CLIENTS_SERVICES)) {
-			\MikrotikQueueSync\Http::forbidden();
-			}
-		$logger = PluginLogManager::create();
-		$logger->clearLog();
-		echo "<br> Log Cleared";
-		} else if ($data['option'] == "WebHook-sZkmt5aIohKXMmRrnI3DfDk") {
-		(new Synchronizer())->sync();
-		}
-	} else {
-	if (! $user || $user->isClient || ! $user->hasViewPermission(PermissionNames::CLIENTS_SERVICES)) {
-		\MikrotikQueueSync\Http::forbidden();
-		}
-	(new Synchronizer())->sync();
-	}
-})();
-http_response_code(200); //Response OK when it's called by a webhook.
+// "Sync" menu: only admins with access to services and plugins
+$user = UcrmSecurity::create()->getUser();
+if (
+    ! $user
+    || $user->isClient
+    || ! ($user->hasViewPermission(PermissionNames::CLIENTS_SERVICES) || $user->hasEditPermission(PermissionNames::CLIENTS_SERVICES))
+    || ! ($user->hasViewPermission(PermissionNames::SYSTEM_PLUGINS) || $user->hasEditPermission(PermissionNames::SYSTEM_PLUGINS))
+) {
+    \MikrotikQueueSync\Http::forbidden();
+}
+
+date_default_timezone_set('America/Argentina/Buenos_Aires');
+echo Synchronizer::run()
+    ? 'Synchronization finished, check the plugin log / Sincronización finalizada, revise el log del complemento'
+    : 'Synchronization failed, check the plugin log / La sincronización falló, revise el log del complemento';
+echo '<br>' . htmlspecialchars(Synchronizer::PRO_NOTICE, ENT_QUOTES);
